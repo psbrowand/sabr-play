@@ -55,22 +55,19 @@ mkdir -p "$WORK/bin"
 python3 "$HERE/build_release.py" --pack "$PACK" --launcher "$WORK/bin/SabrPlay-Setup.exe" --version "$VER" --out "$OUT"
 
 echo "== secret scan (pack files, manifest, launcher) - patterns only, values are never printed"
-python3 - "$PACK/files" "$OUT" <<'PY'
-import os, re, sys
+python3 - "$PACK" "$OUT" <<'PY'
+import json, os, re, sys
 pats = {"private IPv4": rb"\b(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b", "steam id": rb"76561[1]9\d{10}", "credential assignment": rb"(?i)(p[a]ss(?:wo)?r?d|t[o]ken|api[_-]?k[e]y|secret_k[e]y)\s*[=:]\s*\S",
         "env var": rb"SCUM_D[A]SH\w*|D[I]SCORD_\w+"}
+pack, out = sys.argv[1:3]
+targets = [os.path.join(pack, "files", e["path"]) for e in json.load(open(os.path.join(pack, "bundle.json")))["files"]]  # only what ships
+targets += [os.path.join(out, n) for n in ("SabrPlay-Setup.exe", "manifest.json")]
 bad = 0
-roots = sys.argv[1:]
-for root in roots:
-    for d, _, names in os.walk(root):
-        for n in names:
-            p = os.path.join(d, n)
-            if n.endswith(".zip"):
-                continue
-            data = open(p, "rb").read()
-            for label, rx in pats.items():
-                if re.search(rx, data):
-                    print("FOUND %s in %s" % (label, os.path.relpath(p, root))); bad += 1
+for p in targets:
+    data = open(p, "rb").read()
+    for label, rx in pats.items():
+        if re.search(rx, data):
+            print("FOUND %s in %s" % (label, os.path.basename(p))); bad += 1
 sys.exit(1 if bad else 0)
 PY
 echo "   clean"
