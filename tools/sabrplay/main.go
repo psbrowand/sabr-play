@@ -80,6 +80,8 @@ func main() {
 		code = app.uninstall()
 	case "status":
 		code = app.status()
+	case "restore-paks": // started hidden by "play"; by hand it just waits for the game to close, or restores after 5 minutes
+		code = app.watchPaks()
 	case "version":
 		fmt.Println("SabrPlay", version)
 	default:

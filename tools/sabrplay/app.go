@@ -36,6 +36,7 @@ type bundle struct {
 	Files    []bundleFile `json:"files"`
 	Launcher *bundleFile  `json:"launcher,omitempty"` // LAN layout: URL path under /files/; release layout: asset name next to manifest.json
 	Archive  *bundleFile  `json:"archive,omitempty"`  // release layout (schema 2): one zip with every file of the pack, path = asset name
+	Paks     []bundleFile `json:"paks,omitempty"`     // content paks, path = asset name next to the manifest (see paks.go); not in the zip
 }
 
 // A mod source is a base URL that serves <base>/manifest.json (or the older <base>/bundle.json) and either
@@ -65,6 +66,7 @@ type state struct {
 	Files      map[string]string `json:"files"`   // path -> sha256 of what we installed
 	Backups    map[string]string `json:"backups"` // path -> backup file name for pre-existing files we replaced
 	Existed    []string          `json:"existed"` // kept (Keep) files we did not create
+	Paks       map[string]string `json:"paks,omitempty"` // pak name -> sha256 of what we installed
 	Shortcuts  []string          `json:"shortcuts"`
 	LaunchArgs []string          `json:"launch_args"`
 }
@@ -263,6 +265,12 @@ func (a *app) fetchFrom(src *source) (*bundle, error) {
 				return nil, err
 			}
 			b.Files[i].SHA256 = strings.ToLower(b.Files[i].SHA256)
+		}
+		for i := range b.Paks {
+			if err := validPak(b.Paks[i].Path); err != nil || b.Paks[i].SHA256 == "" {
+				return nil, fmt.Errorf("bad pak entry in %s: %q", name, b.Paks[i].Path)
+			}
+			b.Paks[i].SHA256 = strings.ToLower(b.Paks[i].SHA256)
 		}
 		return &b, nil
 	}
@@ -593,6 +601,7 @@ func (a *app) install() int {
 		a.say("ERROR: SCUM is running. Close the game and run the installer again.")
 		return 1
 	}
+	a.restorePaks()
 	a.st.ScumDir, a.st.Win64, a.st.ScumExe = scumDir, win64, scumExe
 	if a.o.server != "" {
 		a.st.Source = a.o.server
@@ -620,6 +629,11 @@ func (a *app) install() int {
 	}
 	a.st.Updated = now
 	a.say("  %d files written, %d removed, rest already up to date.", n, rm)
+	if _, err := a.syncPaks(b); err != nil {
+		a.saveState()
+		a.say("ERROR while installing: %v", err)
+		return 1
+	}
 	// keep a copy of ourselves in the app folder: the shortcuts point there, so the Downloads copy can be deleted
 	self, _ := os.Executable()
 	target := filepath.Join(a.home, exeName())
@@ -653,6 +667,9 @@ func (a *app) play() int {
 		return a.install()
 	}
 	a.say("Play SABR %s%s", version, warning)
+	if !gameRunning() {
+		a.restorePaks() // left behind if the PC went down while the game was running
+	}
 	if !a.o.noUpdate {
 		b, err := a.fetchBundle()
 		switch {
@@ -676,6 +693,12 @@ func (a *app) play() int {
 			} else {
 				a.say("Mods are up to date (%s).", a.st.Version)
 			}
+			if n, err := a.syncPaks(b); err != nil {
+				a.say("WARNING: content update incomplete: %v", err)
+			} else if n > 0 {
+				a.say("  %d content paks updated.", n)
+			}
+			a.saveState()
 		}
 	}
 	if _, err := os.Stat(a.st.ScumExe); err != nil {
@@ -696,12 +719,28 @@ func (a *app) play() int {
 		a.say("SCUM is already running.")
 		return 0
 	}
-	args := append(append([]string{}, a.st.LaunchArgs...), a.o.extra...)
+	args := append([]string{}, a.st.LaunchArgs...)
+	paks := a.stashedPaks()
+	if len(paks) > 0 {
+		args = appendUnique(args, pakFlag)
+	}
+	args = append(args, a.o.extra...)
 	a.say("Starting: %s %s", a.st.ScumExe, strings.Join(args, " "))
 	if a.o.dryLaunch || a.o.noLaunch {
 		return 0
 	}
+	if len(paks) > 0 {
+		if err := a.activatePaks(paks); err != nil {
+			a.restorePaks()
+			a.say("ERROR: could not activate the content paks: %v", err)
+			return 1
+		}
+		if err := a.startPakWatcher(); err != nil {
+			a.say("WARNING: %v. After the game closes, run: SabrPlay restore-paks", err)
+		}
+	}
 	if err := spawnDetached(a.st.ScumExe, filepath.Dir(a.st.ScumExe), args); err != nil {
+		a.restorePaks()
 		a.say("ERROR: could not start the game: %v", err)
 		return 1
 	}
@@ -755,6 +794,11 @@ func (a *app) uninstall() int {
 			a.say("WARNING: could not restore %s: %v", p, err)
 		}
 	}
+	for name := range a.st.Paks {
+		if validPak(name) == nil {
+			a.deletePak(name)
+		}
+	}
 	// our mod folder (data/log written at runtime) and empty directories
 	os.RemoveAll(filepath.Join(a.st.Win64, "Mods", "SabrVoice"))
 	pruneEmpty(filepath.Join(a.st.Win64, "Mods"))
@@ -803,7 +847,7 @@ func pruneEmpty(dir string) {
 func (a *app) status() int {
 	b, _ := json.MarshalIndent(map[string]interface{}{
 		"installed": a.installed(), "version": a.st.Version, "source": a.sources()[0].base, "scum": a.st.ScumExe, "files": len(a.st.Files),
-		"launch_args": a.st.LaunchArgs, "home": a.home, "launcher": version,
+		"launch_args": a.st.LaunchArgs, "home": a.home, "launcher": version, "paks": a.st.Paks,
 	}, "", "  ")
 	fmt.Fprintln(a.out, string(b))
 	return 0

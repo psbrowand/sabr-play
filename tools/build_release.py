@@ -33,6 +33,7 @@ def main(argv=None):
     ap.add_argument("--launcher", required=True, help="the launcher exe (becomes SabrPlay-Setup.exe)")
     ap.add_argument("--version", required=True, help="release / pack version, e.g. 1.0.0")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--pak", action="append", default=[], help="a content pak to ship as its own asset (repeatable); never put in the zip, so a small mod update doesn't re-download it")
     a = ap.parse_args(argv)
 
     with open(os.path.join(a.pack, "bundle.json"), encoding="utf-8") as f:
@@ -65,11 +66,20 @@ def main(argv=None):
         "archive": {"path": "sabr-modpack.zip", "sha256": sha(zpath), "size": os.path.getsize(zpath)},
         "launcher": {"path": "SabrPlay-Setup.exe", "sha256": sha(exe), "size": os.path.getsize(exe)},
     }
+    paks = []
+    for src in a.pak:
+        name = os.path.basename(src)
+        if not name.lower().endswith(".pak"):
+            raise SystemExit("not a pak: %s" % src)
+        shutil.copy(src, os.path.join(out, name))
+        paks.append({"path": name, "sha256": sha(src), "size": os.path.getsize(src)})
+    if paks:
+        manifest["paks"] = paks
     with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)
         f.write("\n")
     with open(os.path.join(out, "SHA256SUMS"), "w") as f:
-        for n in ("SabrPlay-Setup.exe", "sabr-modpack.zip", "manifest.json"):
+        for n in ["SabrPlay-Setup.exe", "sabr-modpack.zip", "manifest.json"] + [p["path"] for p in paks]:
             f.write("%s  %s\n" % (sha(os.path.join(out, n)), n))
     print("release %s: %d pack files, zip %.1f MB, launcher %.1f MB -> %s" % (
         a.version, len(b["files"]), manifest["archive"]["size"] / 1e6, manifest["launcher"]["size"] / 1e6, out))
